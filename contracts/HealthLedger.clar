@@ -11,6 +11,9 @@
 (define-constant ERR_ALREADY_FILLED (err u109))
 (define-constant ERR_INVALID_PHARMACY (err u110))
 (define-constant ERR_INSUFFICIENT_REFILLS (err u111))
+(define-constant ERR_INVALID_CATEGORY (err u112))
+(define-constant ERR_INVALID_PRIORITY (err u113))
+(define-constant ERR_NOT_CLASSIFIED (err u114))
 
 (define-data-var next-record-id uint u1)
 (define-data-var total-records uint u0)
@@ -91,6 +94,11 @@
 (define-data-var next-log-id uint u1)
 (define-data-var next-prescription-id uint u1)
 (define-data-var total-prescriptions uint u0)
+
+(define-map record-classifications { record-id: uint, patient: principal } {
+    category: (string-ascii 20),
+    priority: uint
+})
 
 (define-public (register-patient (emergency-contact (optional principal)))
     (let ((patient-id (var-get total-patients)))
@@ -397,3 +405,51 @@
 
 (define-private (get-fills-for-prescription (prescription-id uint))
     (list))
+
+(define-private (is-valid-category (category (string-ascii 20)))
+    (or (is-eq category "Labs") (is-eq category "Imaging") (is-eq category "Prescriptions")
+        (is-eq category "Visits") (is-eq category "Notes") (is-eq category "TestResults")
+        (is-eq category "Immunizations") (is-eq category "Allergies")))
+
+(define-private (is-valid-priority (priority uint))
+    (and (>= priority u1) (<= priority u5)))
+
+(define-public (classify-record (record-id uint) (patient principal) (category (string-ascii 20)) (priority uint))
+    (let ((record (unwrap! (map-get? patient-records record-id) ERR_RECORD_NOT_FOUND)))
+        (asserts! (is-valid-category category) ERR_INVALID_CATEGORY)
+        (asserts! (is-valid-priority priority) ERR_INVALID_PRIORITY)
+        (asserts! (or (is-eq tx-sender patient) (has-permission patient tx-sender "read") (has-permission patient tx-sender "write")) ERR_NOT_AUTHORIZED)
+        (asserts! (is-eq (get patient record) patient) ERR_INVALID_PATIENT)
+        (map-set record-classifications { record-id: record-id, patient: patient } {
+            category: category,
+            priority: priority
+        })
+        (ok true)))
+
+(define-public (update-record-classification (record-id uint) (patient principal) (category (string-ascii 20)) (priority uint))
+    (let ((existing (unwrap! (map-get? record-classifications { record-id: record-id, patient: patient }) ERR_NOT_CLASSIFIED)))
+        (asserts! (is-valid-category category) ERR_INVALID_CATEGORY)
+        (asserts! (is-valid-priority priority) ERR_INVALID_PRIORITY)
+        (asserts! (or (is-eq tx-sender patient) (has-permission patient tx-sender "write")) ERR_NOT_AUTHORIZED)
+        (map-set record-classifications { record-id: record-id, patient: patient } {
+            category: category,
+            priority: priority
+        })
+        (ok true)))
+
+(define-read-only (get-record-category (record-id uint) (patient principal))
+    (if (can-access-record patient tx-sender)
+        (ok (map-get? record-classifications { record-id: record-id, patient: patient }))
+        ERR_ACCESS_DENIED))
+
+(define-read-only (get-records-by-category (patient principal) (category (string-ascii 20)))
+    (if (can-access-record patient tx-sender)
+        (if (is-valid-category category)
+            (ok (list))
+            ERR_INVALID_CATEGORY)
+        ERR_ACCESS_DENIED))
+
+(define-read-only (get-critical-records (patient principal))
+    (if (can-access-record patient tx-sender)
+        (ok (list))
+        ERR_ACCESS_DENIED))
