@@ -14,6 +14,21 @@
 (define-constant ERR_INVALID_CATEGORY (err u112))
 (define-constant ERR_INVALID_PRIORITY (err u113))
 (define-constant ERR_NOT_CLASSIFIED (err u114))
+(define-constant ERR_INVALID_ALERT_TYPE (err u115))
+(define-constant ERR_INVALID_SEVERITY (err u116))
+(define-constant ERR_ALERT_NOT_FOUND (err u117))
+(define-constant ERR_DUPLICATE_ALERT (err u118))
+(define-constant ERR_INVALID_ALERT_STATUS (err u119))
+
+(define-constant SEVERITY_CRITICAL u4)
+(define-constant SEVERITY_HIGH u3)
+(define-constant SEVERITY_MEDIUM u2)
+(define-constant SEVERITY_LOW u1)
+
+(define-constant ALERT_TYPE_ALLERGY u1)
+(define-constant ALERT_TYPE_DRUG_INTERACTION u2)
+(define-constant ALERT_TYPE_CONTRAINDICATION u3)
+(define-constant ALERT_TYPE_WARNING u4)
 
 (define-data-var next-record-id uint u1)
 (define-data-var total-records uint u0)
@@ -99,6 +114,23 @@
     category: (string-ascii 20),
     priority: uint
 })
+
+(define-map medical-alerts { patient: principal, alert-id: uint } {
+    alert-type: uint,
+    severity: uint,
+    substance: (string-ascii 100),
+    description: (string-ascii 500),
+    created-by: principal,
+    created-at: uint,
+    updated-at: uint,
+    is-active: bool
+})
+
+(define-map patient-alert-count principal uint)
+(define-map alert-type-index { patient: principal, alert-type: uint, index: uint } { alert-id: uint })
+(define-map alert-type-count { patient: principal, alert-type: uint } uint)
+
+(define-data-var next-global-alert-id uint u0)
 
 (define-public (register-patient (emergency-contact (optional principal)))
     (let ((patient-id (var-get total-patients)))
@@ -453,3 +485,176 @@
     (if (can-access-record patient tx-sender)
         (ok (list))
         ERR_ACCESS_DENIED))
+
+(define-public (register-medical-alert (patient principal) (alert-type uint) (severity uint) (substance (string-ascii 100)) (description (string-ascii 500)))
+    (let
+        (
+            (provider tx-sender)
+            (current-block stacks-block-height)
+            (existing-count (default-to u0 (map-get? patient-alert-count patient)))
+            (new-alert-id (+ existing-count u1))
+            (type-count (default-to u0 (map-get? alert-type-count { patient: patient, alert-type: alert-type })))
+        )
+        (asserts! (is-some (map-get? healthcare-providers provider)) ERR_NOT_AUTHORIZED)
+        (asserts! (can-access-record patient provider) ERR_ACCESS_DENIED)
+        (asserts! (validate-alert-type alert-type) ERR_INVALID_ALERT_TYPE)
+        (asserts! (validate-severity severity) ERR_INVALID_SEVERITY)
+        (asserts! (> (len substance) u0) ERR_INVALID_DATA)
+        (asserts! (> (len description) u0) ERR_INVALID_DATA)
+        
+        (map-set medical-alerts
+            { patient: patient, alert-id: new-alert-id }
+            {
+                alert-type: alert-type,
+                severity: severity,
+                substance: substance,
+                description: description,
+                created-by: provider,
+                created-at: current-block,
+                updated-at: current-block,
+                is-active: true
+            }
+        )
+        
+        (map-set patient-alert-count patient new-alert-id)
+        (map-set alert-type-index
+            { patient: patient, alert-type: alert-type, index: (+ type-count u1) }
+            { alert-id: new-alert-id }
+        )
+        (map-set alert-type-count
+            { patient: patient, alert-type: alert-type }
+            (+ type-count u1)
+        )
+        
+        (var-set next-global-alert-id (+ (var-get next-global-alert-id) u1))
+        (log-access new-alert-id provider "alert-create" none)
+        (ok new-alert-id)
+    )
+)
+
+(define-public (update-medical-alert (patient principal) (alert-id uint) (severity uint) (description (string-ascii 500)))
+    (let
+        (
+            (provider tx-sender)
+            (current-block stacks-block-height)
+            (alert-data (unwrap! (map-get? medical-alerts { patient: patient, alert-id: alert-id }) ERR_ALERT_NOT_FOUND))
+        )
+        (asserts! (is-some (map-get? healthcare-providers provider)) ERR_NOT_AUTHORIZED)
+        (asserts! (can-access-record patient provider) ERR_ACCESS_DENIED)
+        (asserts! (validate-severity severity) ERR_INVALID_SEVERITY)
+        (asserts! (> (len description) u0) ERR_INVALID_DATA)
+        
+        (map-set medical-alerts
+            { patient: patient, alert-id: alert-id }
+            (merge alert-data {
+                severity: severity,
+                description: description,
+                updated-at: current-block
+            })
+        )
+        (log-access alert-id provider "alert-update" none)
+        (ok true)
+    )
+)
+
+(define-public (deactivate-medical-alert (patient principal) (alert-id uint))
+    (let
+        (
+            (provider tx-sender)
+            (current-block stacks-block-height)
+            (alert-data (unwrap! (map-get? medical-alerts { patient: patient, alert-id: alert-id }) ERR_ALERT_NOT_FOUND))
+        )
+        (asserts! (is-some (map-get? healthcare-providers provider)) ERR_NOT_AUTHORIZED)
+        (asserts! (can-access-record patient provider) ERR_ACCESS_DENIED)
+        (asserts! (get is-active alert-data) ERR_INVALID_ALERT_STATUS)
+        
+        (map-set medical-alerts
+            { patient: patient, alert-id: alert-id }
+            (merge alert-data {
+                is-active: false,
+                updated-at: current-block
+            })
+        )
+        (log-access alert-id provider "alert-deactivate" none)
+        (ok true)
+    )
+)
+
+(define-public (reactivate-medical-alert (patient principal) (alert-id uint))
+    (let
+        (
+            (provider tx-sender)
+            (current-block stacks-block-height)
+            (alert-data (unwrap! (map-get? medical-alerts { patient: patient, alert-id: alert-id }) ERR_ALERT_NOT_FOUND))
+        )
+        (asserts! (is-some (map-get? healthcare-providers provider)) ERR_NOT_AUTHORIZED)
+        (asserts! (can-access-record patient provider) ERR_ACCESS_DENIED)
+        (asserts! (not (get is-active alert-data)) ERR_INVALID_ALERT_STATUS)
+        
+        (map-set medical-alerts
+            { patient: patient, alert-id: alert-id }
+            (merge alert-data {
+                is-active: true,
+                updated-at: current-block
+            })
+        )
+        (log-access alert-id provider "alert-reactivate" none)
+        (ok true)
+    )
+)
+
+(define-private (validate-alert-type (alert-type uint))
+    (and
+        (>= alert-type u1)
+        (<= alert-type u4)
+    )
+)
+
+(define-private (validate-severity (severity uint))
+    (and
+        (>= severity u1)
+        (<= severity u4)
+    )
+)
+
+(define-read-only (get-medical-alert (patient principal) (alert-id uint))
+    (map-get? medical-alerts { patient: patient, alert-id: alert-id })
+)
+
+(define-read-only (get-patient-alert-count (patient principal))
+    (default-to u0 (map-get? patient-alert-count patient))
+)
+
+(define-read-only (get-alerts-by-type (patient principal) (alert-type uint))
+    (let
+        (
+            (type-count (default-to u0 (map-get? alert-type-count { patient: patient, alert-type: alert-type })))
+        )
+        (ok type-count)
+    )
+)
+
+(define-read-only (check-drug-interaction (patient principal) (substance (string-ascii 100)))
+    (let
+        (
+            (total-alerts (get-patient-alert-count patient))
+        )
+        (ok (> total-alerts u0))
+    )
+)
+
+(define-read-only (get-critical-alerts (patient principal))
+    (let
+        (
+            (count (get-patient-alert-count patient))
+        )
+        (if (> count u0)
+            (ok count)
+            (ok u0)
+        )
+    )
+)
+
+(define-read-only (has-active-alerts (patient principal))
+    (> (get-patient-alert-count patient) u0)
+)
